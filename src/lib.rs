@@ -9,9 +9,10 @@ use solana_program::{
     sysvar::Sysvar,
 };
 use borsh::{BorshDeserialize, BorshSerialize};
+use std::collections::HashMap;
 
 // Define the program ID
-solana_program::declare_id!("EnergyTradingProgramID11111111111111111111111111");
+solana_program::declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
 pub enum ParticipantType {
@@ -24,12 +25,11 @@ pub enum ParticipantType {
 pub struct Participant {
     pub id: Pubkey,
     pub participant_type: ParticipantType,
-    pub energy_balance: i64,
-    pub token_balance: u64,
+    pub wallet_balance: u64,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
-pub struct EnergyOffer {
+pub struct EnergyProduction {
     pub producer_id: Pubkey,
     pub energy_amount: u64,
     pub price: u64,
@@ -39,23 +39,35 @@ pub struct EnergyOffer {
 pub struct EnergyDemand {
     pub consumer_id: Pubkey,
     pub energy_amount: u64,
-    pub max_price: u64,
+    pub price_limit: u64,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone)]
+pub struct Transaction {
+    pub from: Pubkey,
+    pub to: Pubkey,
+    pub amount: u64,
+    pub price: u64,
+    pub timestamp: i64,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug)]
-pub struct MarketState {
+pub struct Ledger {
     pub participants: Vec<Participant>,
-    pub energy_offers: Vec<EnergyOffer>,
-    pub energy_demands: Vec<EnergyDemand>,
+    pub productions: Vec<EnergyProduction>,
+    pub demands: Vec<EnergyDemand>,
+    pub transactions: Vec<Transaction>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug)]
 pub enum EnergyMarketInstruction {
-    InitializeMarket,
+    InitializeLedger,
     RegisterParticipant { participant_type: ParticipantType },
-    SubmitEnergyOffer { energy_amount: u64, price: u64 },
-    SubmitEnergyDemand { energy_amount: u64, max_price: u64 },
-    MatchOffers,
+    ReportProduction { energy_amount: u64, price: u64 },
+    PostDemand { energy_amount: u64, price_limit: u64 },
+    MatchTransactions,
+    Deposit { amount: u64 },
+    Withdraw { amount: u64 },
 }
 
 entrypoint!(process_instruction);
@@ -68,178 +80,237 @@ pub fn process_instruction(
     let instruction = EnergyMarketInstruction::try_from_slice(instruction_data)?;
 
     match instruction {
-        EnergyMarketInstruction::InitializeMarket => initialize_market(accounts, program_id),
+        EnergyMarketInstruction::InitializeLedger => initialize_ledger(program_id, accounts),
         EnergyMarketInstruction::RegisterParticipant { participant_type } => {
-            register_participant(accounts, program_id, participant_type)
+            register_participant(program_id, accounts, participant_type)
         }
-        EnergyMarketInstruction::SubmitEnergyOffer { energy_amount, price } => {
-            submit_energy_offer(accounts, program_id, energy_amount, price)
+        EnergyMarketInstruction::ReportProduction { energy_amount, price } => {
+            report_energy_production(program_id, accounts, energy_amount, price)
         }
-        EnergyMarketInstruction::SubmitEnergyDemand { energy_amount, max_price } => {
-            submit_energy_demand(accounts, program_id, energy_amount, max_price)
+        EnergyMarketInstruction::PostDemand { energy_amount, price_limit } => {
+            post_energy_demand(program_id, accounts, energy_amount, price_limit)
         }
-        EnergyMarketInstruction::MatchOffers => match_offers(accounts, program_id),
+        EnergyMarketInstruction::MatchTransactions => match_transactions(program_id, accounts),
+        EnergyMarketInstruction::Deposit { amount } => deposit(program_id, accounts, amount),
+        EnergyMarketInstruction::Withdraw { amount } => withdraw(program_id, accounts, amount),
     }
 }
 
-fn initialize_market(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+fn initialize_ledger(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
-    let market_account = next_account_info(account_info_iter)?;
+    let ledger_account = next_account_info(account_info_iter)?;
 
-    if market_account.owner != program_id {
+    if ledger_account.owner != program_id {
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let market_state = MarketState {
+    let ledger = Ledger {
         participants: Vec::new(),
-        energy_offers: Vec::new(),
-        energy_demands: Vec::new(),
+        productions: Vec::new(),
+        demands: Vec::new(),
+        transactions: Vec::new(),
     };
 
-    market_state.serialize(&mut &mut market_account.data.borrow_mut()[..])?;
+    ledger.serialize(&mut &mut ledger_account.data.borrow_mut()[..])?;
 
-    msg!("Energy market initialized");
     Ok(())
 }
 
-fn register_participant(
-    accounts: &[AccountInfo],
-    program_id: &Pubkey,
-    participant_type: ParticipantType,
-) -> ProgramResult {
+fn register_participant(program_id: &Pubkey, accounts: &[AccountInfo], participant_type: ParticipantType) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
-    let market_account = next_account_info(account_info_iter)?;
     let participant_account = next_account_info(account_info_iter)?;
+    let ledger_account = next_account_info(account_info_iter)?;
 
-    if market_account.owner != program_id {
+    if ledger_account.owner != program_id {
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let mut market_state = MarketState::try_from_slice(&market_account.data.borrow())?;
+    let mut ledger = Ledger::try_from_slice(&ledger_account.data.borrow())?;
 
     let new_participant = Participant {
         id: *participant_account.key,
         participant_type,
-        energy_balance: 0,
-        token_balance: 1000, // Initial balance for simplicity
+        wallet_balance: 0,
     };
 
-    market_state.participants.push(new_participant);
+    ledger.participants.push(new_participant);
 
-    market_state.serialize(&mut &mut market_account.data.borrow_mut()[..])?;
+    ledger.serialize(&mut &mut ledger_account.data.borrow_mut()[..])?;
 
-    msg!("Participant registered successfully");
     Ok(())
 }
 
-fn submit_energy_offer(
-    accounts: &[AccountInfo],
-    program_id: &Pubkey,
-    energy_amount: u64,
-    price: u64,
-) -> ProgramResult {
+fn report_energy_production(program_id: &Pubkey, accounts: &[AccountInfo], energy_amount: u64, price: u64) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
-    let market_account = next_account_info(account_info_iter)?;
     let producer_account = next_account_info(account_info_iter)?;
+    let ledger_account = next_account_info(account_info_iter)?;
 
-    if market_account.owner != program_id {
+    if ledger_account.owner != program_id {
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let mut market_state = MarketState::try_from_slice(&market_account.data.borrow())?;
+    let mut ledger = Ledger::try_from_slice(&ledger_account.data.borrow())?;
 
-    let offer = EnergyOffer {
+    if !ledger.participants.iter().any(|p| p.id == *producer_account.key) {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    let production = EnergyProduction {
         producer_id: *producer_account.key,
         energy_amount,
         price,
     };
 
-    market_state.energy_offers.push(offer);
+    ledger.productions.push(production);
 
-    market_state.serialize(&mut &mut market_account.data.borrow_mut()[..])?;
+    ledger.serialize(&mut &mut ledger_account.data.borrow_mut()[..])?;
 
-    msg!("Energy offer submitted successfully");
     Ok(())
 }
 
-fn submit_energy_demand(
-    accounts: &[AccountInfo],
-    program_id: &Pubkey,
-    energy_amount: u64,
-    max_price: u64,
-) -> ProgramResult {
+fn post_energy_demand(program_id: &Pubkey, accounts: &[AccountInfo], energy_amount: u64, price_limit: u64) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
-    let market_account = next_account_info(account_info_iter)?;
     let consumer_account = next_account_info(account_info_iter)?;
+    let ledger_account = next_account_info(account_info_iter)?;
 
-    if market_account.owner != program_id {
+    if ledger_account.owner != program_id {
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let mut market_state = MarketState::try_from_slice(&market_account.data.borrow())?;
+    let mut ledger = Ledger::try_from_slice(&ledger_account.data.borrow())?;
+
+    if !ledger.participants.iter().any(|p| p.id == *consumer_account.key) {
+        return Err(ProgramError::InvalidAccountData);
+    }
 
     let demand = EnergyDemand {
         consumer_id: *consumer_account.key,
         energy_amount,
-        max_price,
+        price_limit,
     };
 
-    market_state.energy_demands.push(demand);
+    ledger.demands.push(demand);
 
-    market_state.serialize(&mut &mut market_account.data.borrow_mut()[..])?;
+    ledger.serialize(&mut &mut ledger_account.data.borrow_mut()[..])?;
 
-    msg!("Energy demand submitted successfully");
     Ok(())
 }
 
-fn match_offers(accounts: &[AccountInfo], program_id: &Pubkey) -> ProgramResult {
+fn match_transactions(program_id: &Pubkey, accounts: &[AccountInfo]) -> ProgramResult {
     let account_info_iter = &mut accounts.iter();
-    let market_account = next_account_info(account_info_iter)?;
+    let ledger_account = next_account_info(account_info_iter)?;
 
-    if market_account.owner != program_id {
+    if ledger_account.owner != program_id {
         return Err(ProgramError::IncorrectProgramId);
     }
 
-    let mut market_state = MarketState::try_from_slice(&market_account.data.borrow())?;
+    let mut ledger = Ledger::try_from_slice(&ledger_account.data.borrow())?;
 
-    // Sort offers by price (ascending) and demands by price (descending)
-    market_state.energy_offers.sort_by(|a, b| a.price.cmp(&b.price));
-    market_state.energy_demands.sort_by(|a, b| b.max_price.cmp(&a.max_price));
+    ledger.demands.sort_by(|a, b| b.energy_amount.cmp(&a.energy_amount));
+    ledger.productions.sort_by(|a, b| a.price.cmp(&b.price));
 
     let mut matched_trades = Vec::new();
 
-    for demand in &market_state.energy_demands {
-        for offer in &market_state.energy_offers {
-            if offer.price <= demand.max_price && offer.energy_amount > 0 {
-                let trade_amount = std::cmp::min(demand.energy_amount, offer.energy_amount);
-                let trade_price = offer.price;
+    for demand in &mut ledger.demands {
+        for production in &mut ledger.productions {
+            if demand.energy_amount == 0 {
+                break;
+            }
+            if demand.energy_amount <= production.energy_amount && demand.price_limit >= production.price {
+                let trade_amount = demand.energy_amount.min(production.energy_amount);
+                let trade_price = production.price;
+                let total_cost = trade_amount.checked_mul(trade_price)
+                    .ok_or(ProgramError::ArithmeticOverflow)?;
 
-                // Update participant balances
-                if let Some(consumer) = market_state.participants.iter_mut().find(|p| p.id == demand.consumer_id) {
-                    consumer.energy_balance += trade_amount as i64;
-                    consumer.token_balance -= trade_amount * trade_price;
-                }
-                if let Some(producer) = market_state.participants.iter_mut().find(|p| p.id == offer.producer_id) {
-                    producer.energy_balance -= trade_amount as i64;
-                    producer.token_balance += trade_amount * trade_price;
-                }
+                // Store the IDs instead of references
+                let consumer_id = demand.consumer_id;
+                let producer_id = production.producer_id;
 
-                matched_trades.push((offer.producer_id, demand.consumer_id, trade_amount, trade_price));
+                // Perform the trade if the consumer has enough balance
+                if let (Some(consumer), Some(producer)) = (
+                    ledger.participants.iter_mut().find(|p| p.id == consumer_id),
+                    ledger.participants.iter_mut().find(|p| p.id == producer_id)
+                ) {
+                    if consumer.wallet_balance >= total_cost {
+                        consumer.wallet_balance = consumer.wallet_balance.checked_sub(total_cost)
+                            .ok_or(ProgramError::ArithmeticOverflow)?;
+                        producer.wallet_balance = producer.wallet_balance.checked_add(total_cost)
+                            .ok_or(ProgramError::ArithmeticOverflow)?;
 
-                // Update remaining energy in the offer
-                if let Some(offer_to_update) = market_state.energy_offers.iter_mut().find(|o| o.producer_id == offer.producer_id) {
-                    offer_to_update.energy_amount -= trade_amount;
+                        demand.energy_amount = demand.energy_amount.checked_sub(trade_amount)
+                            .ok_or(ProgramError::ArithmeticOverflow)?;
+                        production.energy_amount = production.energy_amount.checked_sub(trade_amount)
+                            .ok_or(ProgramError::ArithmeticOverflow)?;
+
+                        matched_trades.push(Transaction {
+                            from: consumer_id,
+                            to: producer_id,
+                            amount: trade_amount,
+                            price: trade_price,
+                            timestamp: Clock::get()?.unix_timestamp,
+                        });
+                    } else {
+                        msg!("Insufficient balance for demand from {:?}", consumer_id);
+                    }
                 }
             }
         }
     }
 
-    // Remove completed offers and demands
-    market_state.energy_offers.retain(|o| o.energy_amount > 0);
-    market_state.energy_demands.retain(|d| d.energy_amount > 0);
+    ledger.productions.retain(|p| p.energy_amount > 0);
+    ledger.demands.retain(|d| d.energy_amount > 0);
+    ledger.transactions.extend(matched_trades);
 
-    market_state.serialize(&mut &mut market_account.data.borrow_mut()[..])?;
+    ledger.serialize(&mut &mut ledger_account.data.borrow_mut()[..])?;
 
-    msg!("Offers matched successfully");
+    Ok(())
+}
+
+fn deposit(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let participant_account = next_account_info(account_info_iter)?;
+    let ledger_account = next_account_info(account_info_iter)?;
+
+    if ledger_account.owner != program_id {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    let mut ledger = Ledger::try_from_slice(&ledger_account.data.borrow())?;
+
+    if let Some(participant) = ledger.participants.iter_mut().find(|p| p.id == *participant_account.key) {
+        participant.wallet_balance = participant.wallet_balance.checked_add(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+    } else {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    ledger.serialize(&mut &mut ledger_account.data.borrow_mut()[..])?;
+
+    Ok(())
+}
+
+fn withdraw(program_id: &Pubkey, accounts: &[AccountInfo], amount: u64) -> ProgramResult {
+    let account_info_iter = &mut accounts.iter();
+    let participant_account = next_account_info(account_info_iter)?;
+    let ledger_account = next_account_info(account_info_iter)?;
+
+    if ledger_account.owner != program_id {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    let mut ledger = Ledger::try_from_slice(&ledger_account.data.borrow())?;
+
+    if let Some(participant) = ledger.participants.iter_mut().find(|p| p.id == *participant_account.key) {
+        if participant.wallet_balance < amount {
+            return Err(ProgramError::InsufficientFunds);
+        }
+        participant.wallet_balance = participant.wallet_balance.checked_sub(amount)
+            .ok_or(ProgramError::ArithmeticOverflow)?;
+    } else {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    ledger.serialize(&mut &mut ledger_account.data.borrow_mut()[..])?;
+
     Ok(())
 }
