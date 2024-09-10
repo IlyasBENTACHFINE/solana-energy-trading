@@ -1,4 +1,4 @@
-# Solana Energy Trading Program
+# Blockchain-based  Energy Trading system Implemntation 
 
 ## Created and Owned by Ilyas BENTACHFINE
 
